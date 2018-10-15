@@ -1,0 +1,953 @@
+---
+title: "Penn Medicine Pyramid"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: scroll
+
+runtime: shiny    
+---
+
+Donor Levels
+=====================================
+
+```{r setup, include=FALSE, message = F, warning = F, error = FALSE}
+
+success <- suppressWarnings(require(pacman))
+if (!success) {install.packages("pacman")
+  require(pacman)
+}
+pacman::p_load(RODBC, dplyr, colorspace, flexdashboard,  DT, ggplot2, plotly, data.table, lubridate)
+
+options(scipen = 999, digits = 2)
+
+
+if(Sys.info()[[1]]!="Windows"){connection <- odbcConnect(dsn="whse")
+                                             } else {source("S:/R/local_db_connection_string.R")}
+
+
+
+qry_gift_detail <- paste0(" Select G.COMMON_ID, G.EMPLID, G.EXT_ORG_ID, C.JC_ID,
+                            G.ROLLUP_ID, G.GIFT_NO, G.COMPOSITE_KEY, G.COMMITMENTS, G.RECEIPTS, G.GIFT_DT,
+                            g.designation || ' - ' || d.descr254 as designation,
+                            c.name, c.pri_cnst_descr, g.whse_gift_type, g.composite_key,
+                            a.class_year
+                            from DWGIFTS.WHSE_GIFT_DETAIL_BEN_MV G,
+                                 DWGIFTS.WHSE_CONSTITUENTS C,
+                                 DWGIFTS.WHSE_DESIGNATION D,
+                                 (select distinct emplid, min(up_pref_class_year) as class_year
+                                  from dwgifts.ps_up_academic_dta_mv
+                                  where up_school = 'MD'
+                                  and up_grad_status = 'C'
+                                  group by emplid)a
+                            where C.COMMON_ID = G.COMMON_ID 
+                            and   C.EMPLID = a.emplid(+)
+                            and   G.DESIGNATION = D.DESIGNATION
+                            and   G.AV_DES_BU = D.SETID
+                            and   G.recognition_type = 'H'
+                            and   G.gift_dt >= Date'2013-01-01'
+                            and   G.ben_unit in ('PMHUP', 'PMPMC', 'PMPAH', 'MEDSC', 'PMPHX','PMHCH', 'AFCRI', 'UPHSS')
+                            and  (G.COMMITMENTS > 0 or G.RECEIPTS > 0)
+                            AND   NVL(G.TT_CONDITIONAL_PLEDGE, 'XX') <> 'Y'
+                            AND   NVL(G.TT_VERBAL, 'XX') <> 'Y'
+                            ")
+
+
+if(!file.exists("gift_detail.Rdata") | as.Date(file.info("gift_detail.Rdata")$mtime) < as.Date(Sys.time())) {
+  gift_detail <- sqlQuery(connection, qry_gift_detail, stringsAsFactors=FALSE,errors=TRUE)
+  save(gift_detail, file = "gift_detail.Rdata")
+} else {
+  load("gift_detail.Rdata")
+}
+
+
+qry_ask <- paste0("select distinct a.cnst_actn_no, 
+                                   max(a.ask_to_amt) as ask_amt
+                   from   dwgifts.ps_av_cnst_actn a,
+                          dwgifts.whse_cnst_ac_asgn_mv ac,
+                          dwgifts.whse_staff_mv s
+                   where  a.RSPL_ID = s.EMPLID
+                   and    a.cnst_actn_no = ac.CNST_ACTN_NO
+                   and    a.ACTN_STAT_CD in ('PND','SCH')
+                   and    a.ACTN_TYPE_CD = 'ASK'
+                   and    s.UNIT_CD = 'MED'
+                   and    ac.asgn_role = 'FOR' 
+                   and    ac.unit_cd = 'MED' 
+                   group by a.cnst_actn_no")
+
+
+
+if(!file.exists("ask.Rdata") | as.Date(file.info("ask.Rdata")$mtime) < as.Date(Sys.time())) {
+  ask <- sqlQuery(connection, qry_ask, stringsAsFactors=FALSE,errors=TRUE)
+  save(ask, file = "ask.Rdata")
+} else {
+  load("ask.Rdata")
+}
+
+
+qry_ask_detail <- paste0("select distinct a.ASK_TO_AMT,
+                a.cnst_actn_no, 
+                w.name,
+                s.NAME as responsible_staff,
+                a.PLANNED_DT,
+                case when a.actn_stat_cd = 'PND' then 'Pending'
+                     when a.actn_stat_cd = 'SCH' then 'Scheduled'
+                     else '' end as action_status,
+                ACTN_DESCR                
+                   from   dwgifts.ps_av_cnst_actn a,
+                          dwgifts.whse_cnst_ac_asgn_mv ac,
+                          dwgifts.whse_staff_mv s,
+                          dwgifts.whse_constituents w
+                   where  a.RSPL_ID = s.EMPLID
+                   and    a.cnst_actn_no = ac.CNST_ACTN_NO
+                   and    a.emplid = w.emplid
+                   and    a.ext_org_id = w.ext_org_id
+                   and    a.ACTN_STAT_CD in ('PND','SCH')
+                   and    a.ACTN_TYPE_CD = 'ASK'
+                   and    s.UNIT_CD = 'MED'
+                   and    ac.asgn_role = 'FOR' 
+                   and    ac.unit_cd = 'MED'")
+
+
+if(!file.exists("ask_detail.Rdata") | as.Date(file.info("ask_detail.Rdata")$mtime) < as.Date(Sys.time())) {
+  ask_detail <- sqlQuery(connection, qry_ask_detail, stringsAsFactors=FALSE,errors=TRUE)
+  save(ask_detail, file = "ask_detail.Rdata")
+} else {
+  load("ask_detail.Rdata")
+}
+
+
+qry_capacity <- paste0("select distinct jc_id, 
+                               max(ability_rating) as ability_rating
+                        from (select w.emplid,
+                                     w.jc_id,
+                                     w.ability_rating
+                              from   dwgifts.whse_constituents w,
+                                    (select a.emplid, 
+                                            'Y' as not_inclined
+                                     from dwgifts.PS_AV_PRSN_RATING_MV a
+                                     where a.rating_cat = 'INCL'
+                                     and   a.eff_status = 'A'
+                                     and   a.ind_cd in ('INCL-N'))ni
+                        where  w.emplid = ni.emplid(+)
+                        and    w.id_type = 'P'
+                        and    w.ability_rating like '%-%'
+                        and    w.UNIT_ASSIGNED = 'MED'
+                        and    nvl(w.UP_RATING_SRC_CODE_DESC,'n') <> 'FAMILY'
+                        and    nvl(w.deceased_flag,'n') <> 'Y'
+                        and    nvl(ni.NOT_INCLINED,'n') <> 'Y')
+                        group by jc_id")
+
+if(!file.exists("capacity.Rdata") | as.Date(file.info("capacity.Rdata")$mtime) < as.Date(Sys.time())) {
+  capacity <- sqlQuery(connection, qry_capacity, stringsAsFactors=FALSE,errors=TRUE)
+  save(capacity, file = "capacity.Rdata")
+} else {
+  load("capacity.Rdata")
+}
+
+
+capacity <- as.data.frame(table(capacity$ABILITY_RATING))
+capacity <- capacity %>%
+            mutate(level = ifelse(Var1 == 'ABIL-K',0,
+                           ifelse(Var1 == 'ABIL-J',1,
+                           ifelse(Var1 == 'ABIL-H',2,
+                           ifelse(Var1 == 'ABIL-G',3,
+                           ifelse(Var1 == 'ABIL-F',4,
+                           ifelse(Var1 == 'ABIL-E',5,
+                           ifelse(Var1 == 'ABIL-D',6,
+                           ifelse(Var1 == 'ABIL-C',7,
+                           ifelse(Var1 == 'ABIL-B',8,
+                           ifelse(Var1 == 'ABIL-A',9,10)))))))))))
+
+#some ability ratings straddle two pyramid levels -- evenly divide
+# capacity_level <- subset(capacity, level == 2 | level == 7)
+# capacity_level$level <- capacity_level$level + 1
+# capacity <- rbind(capacity, capacity_level)
+
+#evenly divide, but use uneven split for odd number division 
+# capacity <- capacity %>%
+#             mutate(`Donor Capacity` =  Freq)
+
+
+capacity <- capacity %>%
+            group_by(level) %>%
+            summarize(`Donor Capacity` = sum(Freq))
+
+names(capacity) <- c("Level","Donor Capacity")
+
+# capacity$Level <- as.factor(capacity$Level)
+
+
+levels <- as.data.frame(0:11)
+names(levels) <- "Level"
+# levels$Level <- as.factor(levels$Level)
+
+
+pyramid1 <- subset(gift_detail, COMMITMENTS > 0)
+pyramid1 <- gift_detail %>%
+            group_by(COMMON_ID, EMPLID, EXT_ORG_ID, JC_ID) %>%
+            summarise(total_commitments = sum(COMMITMENTS))
+
+pyramid1 <- subset(pyramid1, total_commitments > 0)
+
+pyramid1 <- pyramid1 %>%
+            mutate(level =
+                   ifelse(total_commitments >= 100000000, 0,
+                   ifelse(total_commitments >= 50000000, 1,
+                   ifelse(total_commitments >= 25000000, 2,
+                   ifelse(total_commitments >= 10000000, 3,
+                   ifelse(total_commitments >= 5000000, 4,
+                   ifelse(total_commitments >= 1000000, 5,
+                   ifelse(total_commitments >= 500000, 6, 
+                   ifelse(total_commitments >= 250000, 7,  
+                   ifelse(total_commitments >= 100000, 8,  
+                   ifelse(total_commitments >= 50000, 9,
+                   ifelse(total_commitments >= 25000, 10,11))))))))))))
+                   
+
+pyr_level <- subset(pyramid1, select = c("COMMON_ID","level"))
+names(pyr_level) <- c("COMMON_ID","Level")
+
+ask_total <- ask %>%
+             summarize(`Gift Level` = 'Grand Total',
+                       `Ask Amounts` = paste0("$",lapply(round(sum(ASK_AMT),0),
+                                 formatC, big.mark = ",", digits=0, format = "f")),
+                       Asks = length(unique(CNST_ACTN_NO)))
+
+ask <- ask %>%
+            mutate(`Gift Level` = 
+                  ifelse(ASK_AMT >= 100000000, "$100,000,000",
+                   ifelse(ASK_AMT >= 50000000, "$50,000,000",
+                   ifelse(ASK_AMT >= 25000000, "$25,000,000",
+                   ifelse(ASK_AMT >= 10000000, "$10,000,000",
+                   ifelse(ASK_AMT >= 5000000, "$5,000,000",   
+                   ifelse(ASK_AMT >= 1000000, "$1,000,000",
+                   ifelse(ASK_AMT >= 500000, "$500,000", 
+                   ifelse(ASK_AMT >= 250000, "$250,000",  
+                   ifelse(ASK_AMT >= 100000, "$100,000", 
+                   ifelse(ASK_AMT >= 50000, "$50,000",
+                   ifelse(ASK_AMT >= 25000, "$25,000","$65")))))))))))
+                   )
+
+ask_lvl <- subset(ask, select = c("CNST_ACTN_NO", "Gift Level"))
+ask_detail <- left_join(ask_detail, ask_lvl)
+
+ask <- ask %>%
+       group_by(`Gift Level`) %>%
+       summarize(`Ask Amounts` = paste0("$",lapply(round(sum(ASK_AMT),0),
+                                 formatC, big.mark = ",", digits=0, format = "f")),
+                Asks = length(unique(CNST_ACTN_NO)))
+
+ask <- rbind(ask, ask_total)
+
+
+donor_count <- as.data.frame(table(pyramid1$level))
+names(donor_count) <- c("Level","Donor Count")
+
+donor_count$Level <- as.integer(as.character(donor_count$Level))
+levels <- left_join(levels, donor_count)
+
+levels <- left_join(levels, capacity)
+
+
+pyramid1_tot <- pyramid1 %>%
+  group_by(level) %>%
+  summarize(strat_gifts = round(sum(total_commitments),0))
+
+names(pyramid1_tot) <- c("Level","Commitments")
+
+# pyramid1_tot$Level <- as.factor(pyramid1_tot$Level)
+# pyramid1_tot$Level <- as.integer(pyramid1_tot$Level)
+
+levels <- left_join(levels, pyramid1_tot)
+levels[is.na(levels)] <- 0
+
+levels <- levels %>%
+          mutate(`Gift Level` = 
+                  ifelse(Level == 0,100000000,
+                  ifelse(Level == 1,50000000,
+                  ifelse(Level == 2,25000000,
+                  ifelse(Level == 3,10000000,
+                  ifelse(Level == 4,5000000,
+                  ifelse(Level == 5,1000000,
+                  ifelse(Level == 6,500000,
+                  ifelse(Level == 7,250000,
+                  ifelse(Level == 8,100000,
+                  ifelse(Level == 9,50000,
+                  ifelse(Level == 10,25000,
+                  ifelse(Level == 11,65,0)))))))))))))
+
+pyr_level <- left_join(pyr_level, levels)
+
+levels <- subset(levels, select = -Level)
+pyr_level <- subset(pyr_level, select = -Level)
+
+gift_detail <- left_join(gift_detail, pyr_level)
+
+giftcols <- c("Gift Level", "COMMON_ID","NAME","PRI_CNST_DESCR","CLASS_YEAR","GIFT_NO","WHSE_GIFT_TYPE",
+              "DESIGNATION","GIFT_DT","COMMITMENTS","RECEIPTS")
+giftdisplay <- gift_detail[giftcols]
+names(giftdisplay) <- c("Gift Level", "Common ID","Name","Constituency","Class Year","Gift Number",
+                        "Gift Type","Designation","Gift Date","Commitments","Receipts")
+
+giftdisplay <- giftdisplay %>%
+               arrange(desc(`Gift Level`), `Common ID`)
+
+
+
+
+
+# Load Penn Palette
+pal <- function (n, h = c(260, 0), c = 80, l = c(30, 90), power = 1.5, 
+    fixup = T, gamma = NULL, alpha = 1, ...) 
+{
+    if (!is.null(gamma)) 
+        warning("'gamma' is deprecated and has no effect")
+    if (n < 1L) 
+        return(character(0L))
+    h <- rep(h, length.out = 2L)
+    c <- c[1L]
+    l <- rep(l, length.out = 2L)
+    power <- rep(power, length.out = 2L)
+    rval <- seq(1, -1, length = n)
+    rval <- hex(polarLUV(L = l[2L] - diff(l) * abs(rval)^power[2L], 
+        C = c * abs(rval)^power[1L], H = ifelse(rval > 0, h[1L], 
+            h[2L])), fixup = fixup, ...)
+    if (!missing(alpha)) {
+        alpha <- pmax(pmin(alpha, 1), 0)
+        alpha <- format(as.hexmode(round(alpha * 255 + 1e-04)), 
+            width = 2L, upper.case = TRUE)
+        rval <- paste(rval, alpha, sep = "")
+    }
+    return(rval)
+}
+
+bmk.format <- function (x, d = 0)
+{
+  ifelse(x >= 1e9, paste0(formatC(x / 1e9, digits = d, format = "f"), "B"),
+  ifelse(x >= 1e6, paste0(formatC(x / 1e6, digits = d, format = "f"), "M"),
+  ifelse(x >= 1e3, paste0(formatC(x / 1e3, digits = d, format = "f"), "K"),
+                      formatC(x, digits = d, format = "f")
+               )))
+}
+
+```
+
+
+
+Inputs {.sidebar}
+-----------------------------------------------------------------------
+
+Donors Needed
+
+```{r donors_needed, message = F, warning = F, error = FALSE}
+
+renderUI(
+{
+sliderInput("Level1", label = "$100 Million",
+            min = 0, max = 5, value = 1)  
+})
+
+renderUI(
+{
+sliderInput("Level2", label = "$50 Million",
+            min = 0, max = 10, value = 5)  
+})
+
+renderUI(
+{
+sliderInput("Level3", label = "$25 Million",
+            min = 0, max = 25, value = 15)  
+})
+renderUI(
+{
+sliderInput("Level4", label = "$10 Million",
+            min = 0, max = 50, value = 25)  
+})
+
+renderUI(
+{
+sliderInput("Level5", label = "$5 Million", 
+            min = 0, max = 100, value = 75)
+})
+
+
+
+renderUI(
+{
+sliderInput("Level6", label = "$1 Million", 
+            min = 0, max = 350, value = 250)
+}
+  )
+
+renderUI(
+{
+sliderInput("Level7", label = "$500,000", 
+            min = 0, max = 350, value = 250)
+})
+
+
+renderUI(
+{
+sliderInput("Level8", label = "$250,000",
+            min = 0, max = 800, value = 500)
+})
+
+
+renderUI(
+{
+sliderInput("Level9", label = "$100,000", 
+            min = 0, max = 1000, value = 700)
+})
+
+
+renderUI(
+{
+sliderInput("Level10", label = "$50,000", 
+            min = 0, max = 1000, value = 750)
+})
+
+renderUI(
+{
+sliderInput("Level11", label = "$25,000", 
+            min = 0, max = 1000, value = 750)
+})
+
+renderUI(
+{
+sliderInput("Level12", label = "$1(Median $65)", 
+            min = 0, max = 10000, value = 1000000)
+})
+
+
+```
+
+
+
+Row
+-----------------------------------------------------------------------
+
+### Donor Pyramid
+
+```{r pyramid, message = F, warning = F, error = FALSE}
+
+DT::renderDataTable({
+  
+  t <- as.data.frame(c(100000000,50000000,25000000,10000000,5000000,
+                       1000000,500000,250000,100000,50000,25000,65))
+  
+  t1 <- as.data.frame(c(input$Level1,input$Level2,input$Level3,input$Level4,input$Level5,input$Level6,input$Level7,input$Level8, input$Level9, input$Level10, input$Level11, input$Level12))
+  
+  
+  t <- cbind(t,t1)
+  names(t) <- c("Gift Level","Donors Needed")
+  
+  t$Subtotal <- t$"Gift Level" * t$"Donors Needed"
+#  t$`Cumulative Total` <- cumsum(t$Subtotal)
+#  t$`Percent of Goal` <- round(t$`Cumulative Total` / 1000000,0)
+  
+  org_pyramid <- subset(pyramid1, EXT_ORG_ID > ' ')
+  ind_pyramid <- subset(pyramid1, EMPLID > ' ')
+  ind_pyramid_jc <- ind_pyramid %>%
+                    group_by (JC_ID) %>%
+                    summarize(level_JC = min(level))
+  
+  pyramid_lvl <- subset(org_pyramid, select = c(COMMON_ID,level))
+  names(ind_pyramid_jc) <- c("COMMON_ID",'level')
+
+  pyramid_lvl <- rbind(pyramid_lvl, ind_pyramid_jc)
+  pyramid_lvl <- as.data.frame(table(pyramid_lvl$level))
+  
+  pyramid_lvl[is.na(pyramid_lvl)] <- 0
+
+  pyramid_lvl <- pyramid_lvl %>%
+           mutate(`Gift Level` = 
+                  ifelse(Var1 == 0,100000000,
+                  ifelse(Var1 == 1,50000000,
+                  ifelse(Var1 == 2,25000000,
+                  ifelse(Var1 == 3,10000000,
+                  ifelse(Var1 == 4,5000000,
+                  ifelse(Var1 == 5,1000000,
+                  ifelse(Var1 == 6,500000,
+                  ifelse(Var1 == 7,250000,
+                  ifelse(Var1 == 8,100000,
+                  ifelse(Var1 == 9,50000,
+                  ifelse(Var1 == 10,25000,
+                  ifelse(Var1 == 11,65,0)))))))))))))
+
+  pyramid_lvl <- subset(pyramid_lvl, select = -Var1)
+  
+  
+  names(pyramid_lvl)[1] <- "Household Donor Count"
+
+
+  t <- left_join(t, pyramid_lvl)
+  t$`Household Donor Count`[which(is.na(t$`Household Donor Count`))] <- 0
+  
+  # levels <- levels[1:11,]
+  t <- left_join(t, levels)
+
+  
+  #  t$`Cumulative Commitments` <- cumsum(t$Commitments)
+  
+
+  
+  t$`Dollar Amount Still Needed` <- t$Subtotal - t$Commitments
+  
+  t$`Percent of Goal` <- ifelse(t$Subtotal == 0, NA, paste0(round((t$Commitments / t$Subtotal)*100,1),'%'))
+ 
+  
+  total_row <- t %>%
+               summarize(`Gift Level` = 'Grand Total',
+                         `Donors Needed` = format(sum(`Donors Needed`),big.mark = ","),
+                          Subtotal = paste0("$",lapply(round(sum(Subtotal),0), formatC, big.mark = ",", digits=0, format = "f")),
+#                         `Cumulative Total` = paste0("$",lapply(round(max(`Cumulative Total`),0), 
+#                                                         formatC, big.mark = ",", digits=0, format = "f")),
+#                         `Percent of Goal` = paste0(max(`Percent of Goal`),'%'),
+                         `Household Donor Count` = format(sum(`Household Donor Count`), big.mark = ","),
+                         `Donor Count` = format(sum(`Donor Count`), big.mark = ","),
+                         `Donor Capacity` = format(sum(`Donor Capacity`), big.mark = ","),
+                          Commitments = paste0("$",lapply(round(sum(Commitments),0),
+                                                   formatC, big.mark = ",", digits=0, format = "f")),
+#                         `Cumulative Commitments` = paste0("$",lapply(round(max(`Cumulative Commitments`),0),
+#                                                     formatC, big.mark = ",", digits=0, format = "f")),                 
+                         `Dollar Amount Still Needed` = paste0("$",lapply(round(sum(`Dollar Amount Still Needed`),0),
+                                                        formatC, big.mark = ",", digits=0, format = "f")))
+  
+  total_row$`Percent of Goal` = paste0(round((sum(t$Commitments) / sum(t$Subtotal))*100,1),'%')
+                         
+                         
+  t$`Gift Level` <- paste0("$", lapply(t$`Gift Level`, formatC, big.mark = ",", digits=0, format = "f"))
+  t$Subtotal <- paste0("$", lapply(t$Subtotal, formatC, big.mark = ",", digits=0, format = "f"))
+#  t$`Cumulative Total` <- paste0("$", lapply(t$`Cumulative Total`, formatC, big.mark = ",", digits=0, format = "f"))
+  t$Commitments <- paste0("$", lapply(round(t$Commitments,0), formatC, big.mark = ",", digits=0, format = "f"))
+#  t$`Cumulative Commitments` <- paste0("$", lapply(t$`Cumulative Commitments`, formatC, big.mark = ",", digits=0, format = "f"))
+  t$`Dollar Amount Still Needed` <- paste0("$", lapply(t$`Dollar Amount Still Needed`, formatC, big.mark = ",", digits=0, format = "f")) 
+  
+#  t$`Percent of Goal` <- paste0(t$`Percent of Goal`,"%")
+  t$`Household Donor Count` = format(t$`Household Donor Count`, big.mark = ",")  
+  t$`Donor Count` = format(t$`Donor Count`, big.mark = ",")
+  t$`Donor Capacity` = format(t$`Donor Capacity`, big.mark = ",")
+  t$`Donors Needed` = format(t$`Donors Needed`,big.mark = ",")
+  
+  
+  t <- rbind(t, total_row)
+  
+  t <- left_join(t, ask)
+  
+   report_columns <- c("Gift Level", "Donors Needed", "Subtotal", "Household Donor Count", "Donor Count", 
+                       "Donor Capacity","Asks","Ask Amounts","Commitments", 
+                       "Dollar Amount Still Needed","Percent of Goal")
+  
+   t <- t[report_columns]   
+   
+   t <- datatable(t, extensions = 'Buttons', 
+                   options = list(scrollY = '470px', scrollX = T, dom = 'Bfrtip', 
+                                  searching = FALSE, paging = FALSE,
+                                  columnDefs = list(list(className = 'dt-center', targets = 0:10)),
+                                  buttons = c('csv'), paging = F), rownames = F)
+
+
+    t
+   },  rownames = F)
+
+```
+
+
+
+Row {.tabset}
+-----------------------------------------------------------------------
+
+###Donors Needed
+
+```{r pyr_chart, message = F, warning = FALSE, error = FALSE, echo=FALSE}
+
+ renderPlotly({
+
+  tb <- as.data.frame(c(100000000,50000000,25000000,10000000,5000000,1000000,500000,250000,100000,50000,25000,65))
+
+  tb1 <- as.data.frame(c(input$Level1,input$Level2,input$Level3,input$Level4,input$Level5,input$Level6,input$Level7,input$Level8, input$Level9, input$Level10, input$Level11, input$Level12))
+
+  tb <- cbind(tb,tb1)
+  names(tb) <- c("Gift Level","Donor Count")
+  tb$Category <- "Donors Needed"
+
+  tb2 <- subset(levels, select = c(`Gift Level`,`Donor Count`))
+  tb2$Category <- "Donors"
+
+  tb1 <- rbind(tb, tb2)
+  
+
+  tb1$`Gift Level` <- paste0("$", lapply(tb1$`Gift Level`, formatC, big.mark = ",", digits=0, format = "f"))
+
+#  tb1 <- subset(tb1, `Gift Level` != '$750')
+
+
+  tb1$label <- format(tb1$`Donor Count`, big.mark = ",")
+
+  gift_levels <- c("$100,000,000","$50,000,000","$25,000,000","$10,000,000","$5,000,000","$1,000,000","$500,000","$250,000","$100,000","$50,000","$25,000")
+
+  tb1_donors <- subset(tb1, Category == "Donors")
+  tb1_needed <- subset(tb1, Category == "Donors Needed")
+
+  p1 <- ggplot(data = tb1, aes(x = `Gift Level`, fill = Category, group = Category)) +
+         geom_bar(stat = "identity", data = tb1_donors, aes(y = `Donor Count`)) +
+         geom_text(data = tb1_donors, aes(y = `Donor Count`, label = label, group = Category),
+                   size = 3,
+                   hjust = -0.5,
+                   color = pal(6)[2]
+                   ) +
+        geom_bar(stat = "identity",  data = tb1_needed, aes(y=`Donor Count` * (-1))) +
+        geom_text(data  = tb1_needed, aes(y = `Donor Count` * (-1), label = label), size = 3,  hjust = 1,
+                  color = pal(6)[2]) +
+        scale_x_discrete(limits = rev(gift_levels)) +
+        scale_y_continuous(limits = c(-600, 600), breaks=seq(-600, 600,100),labels=abs(seq(-600, 600,100))) +
+    theme(axis.text = element_text(colour = "black"),
+          plot.title = element_text(lineheight=.8) ) +
+    coord_flip() +
+    annotate("text", x = 7, y = -400, label = "Donors Needed") +
+    annotate("text", x = 7, y = 400, label = "Donors") +
+    ylab("") + xlab("") + guides(fill=FALSE) +
+    scale_fill_manual(values = c(pal(3)[3], pal(3)[1])) +
+    theme_bw()
+
+  p1
+
+  gp <- ggplotly(p1, tooltip = "text")
+  gp
+
+ })
+
+
+
+```
+
+###Making History
+
+```{r mh donor pyramid}
+
+  tb <- as.data.frame(c(1,2,3,4,5,6,7,8,9,10,11,12,13))
+
+  #Making History donor counts from NURSG Campaign Capacity report - 
+  tb1 <- as.data.frame(c(1,2,4,12,20,38,118,130,197,376,382,505,71247))
+
+  tb <- cbind(tb,tb1)
+  names(tb) <- c("Gift Level","Donor Count")
+  tb$Category <- "Donors Needed"
+
+  #tb2 <- subset(levels, select = c(`Gift Level`,`Donor Count`))
+  tb2 <- tb
+  tb2$Category <- "Donors"
+
+  tb1 <- rbind(tb, tb2)
+  
+
+  tb1$`Gift Level` <- paste0("$", lapply(tb1$`Gift Level`, formatC, big.mark = ",", digits=0, format = "f"))
+
+#  tb1 <- subset(tb1, `Gift Level` != '$750')
+
+
+  tb1$label <- format(tb1$`Donor Count`, big.mark = ",")
+
+  gift_levels <- c("$100,000,000","$50,000,000","$25,000,000","$10,000,000","$5,000,000","$2,500,000","$1,000,000","$500,000","$250,000","$100,000","$50,000","$25,000","$1")
+
+  tb1_donors <- subset(tb1, Category == "Donors")
+  tb1_needed <- subset(tb1, Category == "Donors Needed")
+
+  row.names(tb1_donors) <- c()  
+  row.names(tb1_needed) <- c()
+  
+  p1 <- ggplot(data = tb1, aes(x = `Gift Level`, fill = Category, group = Category)) +
+         geom_bar(stat = "identity", data = tb1_donors, aes(y = `Donor Count`)) +
+        # geom_text(data = tb1_donors, aes(y = `Donor Count`, label = label, group = Category),
+        #           size = 3,
+        #           hjust = -1.6,
+        #           color = pal(6)[2]
+        #           ) +
+        annotate("text", x = tb1_donors$`Gift Level`, y = 0, label = tb1_donors$`Donor Count`,
+                 size = 3, color = pal(8)[3]) + 
+        geom_bar(stat = "identity",  data = tb1_needed, aes(y=`Donor Count` * (-1))) +
+     #   geom_text(data  = tb1_needed, aes(y = `Donor Count` * (-1), label = label), size = 3,  hjust = 1,
+     #             color = pal(6)[2]) +
+        scale_x_discrete(limits = rev(gift_levels)) +
+        scale_y_continuous(limits = c(-600, 600), breaks=seq(-600, 600,100),labels=abs(seq(-600, 600,100))) +
+    theme(axis.text = element_text(colour = "black"),
+          plot.title = element_text(lineheight=.8) ) +
+    coord_flip() +
+    annotate("text", x = 7, y = 0, label = "") +
+    annotate("text", x = 10, y = 0, label = "Donors") +
+    ylab("") + xlab("") + guides(fill=FALSE) + theme(legend.position="none") +
+    scale_fill_manual(values = c(pal(3)[3], pal(3)[3])) 
+
+  p1
+
+  gp <- ggplotly(p1, tooltip = "text")
+  gp
+
+```
+
+
+
+
+
+###Gift Progress
+
+```{r progress, message = F, warning = F, error = FALSE}
+  renderPlotly({
+   t <- as.data.frame(c(100000000,50000000,25000000,10000000,5000000,1000000,500000,250000,100000,50000,25000,65))
+  
+  t1 <- as.data.frame(c(input$Level1,input$Level2,input$Level3,input$Level4,input$Level5,input$Level6,input$Level7,input$Level8, input$Level9, input$Level10, input$Level11, input$Level12))
+  
+  t <- cbind(t,t1)
+  names(t) <- c("Gift Level","Donors Needed")
+  
+  t$Subtotal <- t$"Gift Level" * t$"Donors Needed"
+
+  
+  org_pyramid <- subset(pyramid1, EXT_ORG_ID > ' ')
+  ind_pyramid <- subset(pyramid1, EMPLID > ' ')
+  ind_pyramid_jc <- ind_pyramid %>%
+                    group_by (JC_ID) %>%
+                    summarize(level_JC = min(level))
+  
+  pyramid_lvl <- subset(org_pyramid, select = c(COMMON_ID,level))
+  names(ind_pyramid_jc) <- c("COMMON_ID",'level')
+
+  pyramid_lvl <- rbind(pyramid_lvl, ind_pyramid_jc)
+  pyramid_lvl <- as.data.frame(table(pyramid_lvl$level))
+  names(pyramid_lvl) <- c("Level",'Freq')
+  
+  pyramid_lvl[is.na(pyramid_lvl)] <- 0
+
+  pyramid_lvl <- pyramid_lvl %>%
+           mutate(`Gift Level` = 
+                    ifelse(Level == 0,100000000,
+                  ifelse(Level == 1,50000000, 
+                  ifelse(Level == 2,25000000,  
+                  ifelse(Level == 3,10000000,
+                  ifelse(Level == 4,5000000,
+                  ifelse(Level == 5,1000000,
+                  ifelse(Level == 6,500000,
+                  ifelse(Level == 7,250000,
+                  ifelse(Level == 8,100000,
+                  ifelse(Level == 9,50000,
+                  ifelse(Level == 10,25000,
+                  ifelse(Level == 11,65,0)))))))))))))
+
+  pyramid_lvl <- subset(pyramid_lvl, select = -Level)
+  
+  
+  names(pyramid_lvl)[1] <- "Household Donor Count"
+
+
+  t <- left_join(t, pyramid_lvl)
+  t$`Household Donor Count`[which(is.na(t$`Household Donor Count`))] <- 0
+  
+  t <- left_join(t, levels)
+  t <- subset(t, select = -`Donor Capacity`)
+  
+  t$SORT_ORDER <- t$`Gift Level` / 1000000
+
+ 
+  total_row <- t %>%
+               summarize(`Gift Level` = 'Grand Total',
+                         `Donors Needed` = format(sum(`Donors Needed`),big.mark = ","),
+                          Subtotal = round(sum(Subtotal),0),
+                         `Household Donor Count` = format(sum(`Household Donor Count`), big.mark = ","),
+                         `Donor Count` = format(sum(`Donor Count`), big.mark = ","),
+                          Commitments = round(sum(Commitments),0),
+                          SORT_ORDER = .00001)
+                         
+                         
+
+  
+  
+  t <- rbind(t, total_row)
+  
+  
+  t$`Gift Level`[which(t$`Gift Level` != 'Grand Total')]  <- paste0("$", lapply(as.integer(t$`Gift Level`[which(t$`Gift Level` != 'Grand Total')]) , formatC, big.mark = ",", digits=0, format = "f"))
+  
+
+      # t <- datatable(t, extensions = 'Buttons', 
+      #              options = list(scrollY = '470px', scrollX = T, dom = 'Bfrtip', 
+      #                             searching = FALSE, paging = FALSE,
+      #                             buttons = c('csv'), paging = F), rownames = F)
+      
+##Remaining Goal Amounts
+t <- mutate(t, GOAL_REMAINING = ifelse(Commitments > Subtotal, 0, Subtotal - Commitments))
+melted_df = melt(t, measure.vars = c("Commitments", "GOAL_REMAINING"))
+levels(melted_df$variable) <- c("Commitments Total", "Goal Remaining")
+melted_df$variable <- factor(melted_df$variable, levels(melted_df$variable)[c(2, 1)])
+#melted_df$SORT_ORDER[melted_df$`Gift Level` == "Grand Total"] <- melted_df$SORT_ORDER[melted_df$`Gift Level` == "Grand Total"] + 100      
+      
+      
+orderdf <- melted_df[order(melted_df$SORT_ORDER),] 
+break_list <- orderdf$`Gift Level`
+
+
+
+          text_labels <- mutate(t, PERCENT_COMPLETE = ifelse(Subtotal == 0, NA, Commitments / Subtotal),
+               LABELY = ifelse(Subtotal > Commitments, Subtotal, Commitments))
+text_labels$PERCENT_COMPLETE <- paste0(round(text_labels$PERCENT_COMPLETE * 100, 0), "%")
+text_labels$PERCENT_COMPLETE[text_labels$PERCENT_COMPLETE == "NA%"] <- ""
+
+spacer <- 0.02 * text_labels$LABELY
+
+
+      
+p <- ggplot(data = melted_df,
+            aes(x = `Gift Level`)) +
+  coord_flip() +
+  geom_bar(stat = 'identity', aes(y = value, fill = variable, 
+                                text = paste0(variable, '\n$', bmk.format(value, 2), '\nGoal \n$', bmk.format(Subtotal, 2))
+                                  ), 
+           color="black") +
+  geom_text(data = text_labels, 
+            aes(y = LABELY + spacer
+                , label = PERCENT_COMPLETE), 
+            hjust = 0, size = 3) +
+  scale_y_continuous(labels = bmk.format) +
+  labs(y = "", x = " ") + guides(fill=FALSE) +
+  scale_fill_manual(values = c(pal(3)[3], pal(3)[1])) +
+  scale_x_discrete(limits = break_list) + 
+  theme(legend.title = element_blank()) +
+  theme_bw()
+    ggplotly(p, tooltip = "text")
+  
+  
+  
+  
+  
+})
+```
+
+
+Gift Detail
+=====================================
+
+Inputs {.sidebar}
+-----------------------------------------------------------------------
+
+```{r level_select}
+lvl <- as.data.frame(c(100000000,50000000,25000000,10000000,5000000,
+                       1000000,500000,250000,100000,50000,25000,65))
+names(lvl) <- "Level"
+lvl$`Gift Level` <- paste0("$", lapply(lvl$Level, formatC, big.mark = ",", digits=0, format = "f"))
+lvl <- subset(lvl, select = -Level)
+
+
+renderUI({
+{
+selectInput("Level", label = "Gift Level", multiple = TRUE, 
+            choices = unique(lvl$`Gift Level`),
+            selected = c("$100,000,000","$75,000,000","$50,000,000","$25,000,000","$10,000,000","$5,000,000","$2,500,000","$1,000,000","$500,000","$250,000","$100,000","$50,000","$25,000","$65"))}
+})
+  
+```
+
+Row {data-height=900}
+-----------------------------------------------------------------------
+
+
+### Gift Detail
+
+```{r detail}
+
+giftdisplay$`Gift Level` <- paste0("$", lapply(giftdisplay$`Gift Level`, formatC, big.mark = ",", digits=0, format = "f")) 
+giftdisplay$Commitments <- paste0("$", lapply(giftdisplay$Commitments, formatC, big.mark = ",", digits=2, format = "f")) 
+giftdisplay$Receipts <- paste0("$", lapply(giftdisplay$Receipts, formatC, big.mark = ",", digits=2, format = "f"))
+
+DT::renderDataTable({
+  t <- giftdisplay
+  
+
+    if(!is.null(input$Level)) 
+      
+    {t <- subset(t, `Gift Level` %in% input$Level)}
+  
+      #auto format date columns (removing time stamp and zone)
+   for(i in names(t[,1:ncol(t)])){
+   if(is.POSIXct(t[[paste(i)]]) == TRUE) {t[[paste(i)]] <- as.Date(strptime(t[[paste(i)]],       format = "%Y-%m-%d"))}
+   }
+  
+   t <- datatable(t, extensions = 'Buttons', 
+                   options = list(scrollX = F, dom = 'Bfrtip', 
+                                  searching = TRUE, paging = TRUE,
+                                  columnDefs = list(list(className = 'dt-center', 
+                                                         targets = 0:10)),
+                                  buttons = c('csv'),   pageLength = 20),  rownames = F)
+
+
+    t
+   }, server = F, rownames = F)
+```
+
+
+Solicitations
+=====================================
+
+Inputs {.sidebar}
+-----------------------------------------------------------------------
+
+```{r ask_select}
+lvla <- as.data.frame(c(100000000,50000000,25000000,10000000,5000000,
+                        1000000,500000,250000,100000,50000,25000,65))
+names(lvla) <- "Level"
+lvla$`Gift Level` <- paste0("$", lapply(lvla$Level, formatC, big.mark = ",", digits=0, format = "f"))
+lvla <- subset(lvla, select = -Level)
+
+renderUI({
+{
+selectInput("Ask Level", label = "Ask Level", multiple = TRUE, 
+            choices = unique(lvla$`Gift Level`),
+            selected = c("$100,000,000",    ,"$50,000,000","$25,000,000","$10,000,000","$5,000,000","$1,000,000","$500,000","$250,000","$100,000","$50,000","$25,000","$65"))}
+})
+  
+```
+
+
+Row {data-height=900}
+-----------------------------------------------------------------------
+
+
+### Solicitations
+
+```{r ask_detail}
+
+names(ask_detail) <- c("Ask Amount", "Action Number", "Name", "Responsible Staff", "Planned Date", "Action Status", "Action Description","Ask Level")
+
+ask_detail <- ask_detail %>%
+              arrange(desc(`Ask Amount`))
+
+ask_detail$`Ask Amount` <- paste0("$", lapply(ask_detail$`Ask Amount`, formatC, big.mark = ",", digits=0, format = "f")) 
+
+askcol <- c("Ask Level","Ask Amount","Action Number","Name","Responsible Staff", "Planned Date", "Action Status", "Action Description")
+
+ask_detail <- ask_detail[askcol]
+
+
+
+DT::renderDataTable({
+  t <- ask_detail
+  
+    if(!is.null(input$`Ask Level`)) 
+      
+    {t <- subset(t, `Ask Level` %in% input$`Ask Level`)}
+
+      #auto format date columns (removing time stamp and zone)
+   for(i in names(t[,1:ncol(t)])){
+   if(is.POSIXct(t[[paste(i)]]) == TRUE) {t[[paste(i)]] <- as.Date(strptime(t[[paste(i)]],       format = "%Y-%m-%d"))}
+   }
+  
+   t <- datatable(t, extensions = 'Buttons', 
+                   options = list(scrollX = F, dom = 'Bfrtip', 
+                                  searching = TRUE, paging = TRUE,
+                                  columnDefs = list(list(className = 'dt-center', 
+                                                         targets = 0:7)),
+                                  buttons = c('csv'),  pageLength = 20), rownames = F)
+
+
+    t
+   }, server = F,  rownames = F)
+```
+
